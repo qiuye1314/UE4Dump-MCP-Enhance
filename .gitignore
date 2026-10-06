@@ -1,25 +1,23 @@
-# ===== 构建产物 =====
-build*/
+# ===== 构建产物（排除）=====
+build/
+build_*/
 outputs/
+
+# ===== 编译中间文件 / 临时文件（排除）=====
 *.o
-*.so
-*.a
-
-# ===== 大二进制 / 资源 =====
-*.apk
-*.png
-*.jpg
-*.jpeg
-tools/
-misc/
-
-# ===== 日志 / 临时 =====
-*.log
+*.obj
 *.tmp
 *.bak
-.DS_Store
-
-# ===== 语言/编译缓存 =====
-.cache/
+*.orig
 __pycache__/
 *.pyc
+.DS_Store
+
+# =====================================================================
+# 说明：以下第三方「预编译依赖库」是编译所必需的，**故意不排除**，
+#      以保证仓库 clone 后可直接编译：
+#   - third_party/ghidra_decomp/libdecomp.a        (Ghidra 反编译器)
+#   - third_party/ghidra_decomp/arm64-v8a.so
+#   - src/GUI/ImGui/misc/git_freetype/**/libfreetype.a  (FreeType)
+#   - KittyMemoryEx/Deps/Keystone/libs-android/**/libkeystone.a (Keystone)
+# =====================================================================
