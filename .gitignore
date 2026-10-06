@@ -1,0 +1,25 @@
+# ===== 构建产物 =====
+build*/
+outputs/
+*.o
+*.so
+*.a
+
+# ===== 大二进制 / 资源 =====
+*.apk
+*.png
+*.jpg
+*.jpeg
+tools/
+misc/
+
+# ===== 日志 / 临时 =====
+*.log
+*.tmp
+*.bak
+.DS_Store
+
+# ===== 语言/编译缓存 =====
+.cache/
+__pycache__/
+*.pyc
