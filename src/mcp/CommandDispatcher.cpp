@@ -1,0 +1,153 @@
+#include "CommandDispatcher.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <utility>
+
+#include "../Utils/Logger.hpp"
+
+namespace UmtMcp
+{
+std::mutex CommandDispatcher::registryMtx_;
+std::unordered_map<std::string, CommandHandler> CommandDispatcher::handlers_;
+std::unordered_map<std::string, bool> CommandDispatcher::fastFlags_;
+CommandQueue *CommandDispatcher::queue_ = nullptr;
+
+void CommandDispatcher::BindQueue(CommandQueue *queue)
+{
+    queue_ = queue;
+}
+
+CommandQueue &CommandDispatcher::Queue()
+{
+    return *queue_;
+}
+
+// 🔴 强制清空队列(安全点:调用方需保证当前无命令在执行中)
+// 用途:新连接建立时清除上一连接遗留的未消费响应,防止孤儿响应污染新会话
+void CommandDispatcher::Clear()
+{
+    if (queue_)
+        queue_->Clear();
+}
+
+void CommandDispatcher::Register(const std::string &cmd, CommandHandler handler, bool isFast)
+{
+    std::lock_guard<std::mutex> lock(registryMtx_);
+    handlers_[cmd] = std::move(handler);
+    fastFlags_[cmd] = isFast;
+}
+
+bool CommandDispatcher::IsRegistered(const std::string &cmd)
+{
+    std::lock_guard<std::mutex> lock(registryMtx_);
+    return handlers_.find(cmd) != handlers_.end();
+}
+
+std::vector<std::string> CommandDispatcher::RegisteredCommands()
+{
+    std::lock_guard<std::mutex> lock(registryMtx_);
+    std::vector<std::string> out;
+    out.reserve(handlers_.size());
+    for (const auto &kv : handlers_)
+        out.push_back(kv.first);
+    // 🔴 排序:确保持久化/序列化顺序稳定,避免非确定性 JSON 输出
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool CommandDispatcher::PollOnce()
+{
+    if (!queue_)
+        return false;
+
+    CommandRequest req;
+    if (!queue_->TryPopRequest(req))
+        return false;
+
+    json response;
+    response["id"] = req.id;
+
+    const auto startedAt = std::chrono::steady_clock::now();
+
+    // 解析 args（缺省为空对象）
+    json args = json::object();
+    if (!req.argsJson.empty())
+    {
+        try
+        {
+            args = json::parse(req.argsJson);
+            if (!args.is_object())
+                args = json::object();
+        }
+        catch (const std::exception &e)
+        {
+            response["ok"] = false;
+            response["error"] = {{"code", Err::kBadArgs}, {"msg", std::string("args 解析失败: ") + e.what()}};
+            queue_->PushResponse({req.id, response.dump()});
+            return true;
+        }
+    }
+
+    CommandHandler handler;
+    {
+        std::lock_guard<std::mutex> lock(registryMtx_);
+        auto it = handlers_.find(req.cmd);
+        if (it == handlers_.end())
+        {
+            response["ok"] = false;
+            response["error"] = {{"code", Err::kUnknownCmd}, {"msg", "未知命令: " + req.cmd}};
+            queue_->PushResponse({req.id, response.dump()});
+            return true;
+        }
+        handler = it->second;
+    }
+
+    // 🔴 让 IMGUI 日志能看到「正在执行哪个命令」
+    LOGI("[MCP·执行] %s", req.cmd.c_str());
+
+    // 执行（快命令当场执行；重活由 START_* 命令的 handler 内部投 gWorkerThread 并短等）
+    try
+    {
+        json data = handler(args);
+        response["ok"] = true;
+        response["data"] = data.is_null() ? json::object() : std::move(data);
+    }
+    catch (const HandlerError &e)
+    {
+        // 执行层错误：转 isError tool result（协议 §5 分层）
+        response["ok"] = false;
+        response["error"] = {{"code", e.code}, {"msg", e.what()}};
+    }
+    catch (const std::exception &e)
+    {
+        response["ok"] = false;
+        response["error"] = {{"code", Err::kInternal}, {"msg", e.what()}};
+    }
+    catch (...)
+    {
+        response["ok"] = false;
+        response["error"] = {{"code", Err::kInternal}, {"msg", "未知异常"}};
+    }
+
+    // 硬超时检查（协议 §3.9）
+    // 同步执行无法中断，此处记录告警——若快命令都超时，说明分级配置错了（应标为重活）。
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - startedAt)
+                               .count();
+    if (elapsedMs > kCommandTimeoutSec * 1000)
+    {
+        LOGE("[MCP] 命令 %s 耗时 %lldms 超过硬超时 %ds —— 该命令不应标记为快命令",
+             req.cmd.c_str(), (long long)elapsedMs, kCommandTimeoutSec);
+    }
+    else
+    {
+        // 🔴 正常完成也打一行，和「·调用/·执行」配成闭环，IMGUI 日志里一眼能看清在做什么
+        LOGI("[MCP·完成] %s  耗时 %lldms", req.cmd.c_str(), (long long)elapsedMs);
+    }
+
+    queue_->PushResponse({req.id, response.dump()});
+    return true;
+}
+
+}  // namespace UmtMcp
